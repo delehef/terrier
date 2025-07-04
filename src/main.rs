@@ -31,6 +31,7 @@ use colored::Colorize;
 use dialoguer::FuzzySelect;
 use fern::colors::{Color, ColoredLevelConfig};
 use log::{error, info, warn};
+use spinoff::{spinners, Spinner};
 use tower::ServiceBuilder;
 
 #[derive(Parser)]
@@ -300,6 +301,9 @@ async fn main() -> anyhow::Result<()> {
     indexed_rx.await.unwrap();
     warn!("Indexing done.");
 
+    let mut spinner = Spinner::new(spinners::Dots, "Indexing functions...", spinoff::Color::Blue); 
+
+
     let mut functions = HashSet::new();
     warn!("Querying for symbols...");
     let ret = server
@@ -348,11 +352,14 @@ async fn main() -> anyhow::Result<()> {
         .map(|f| f.pretty(&root))
         .collect::<Vec<_>>();
 
+    spinner.stop_and_persist("", "Functions indexed");
+    
     while let Some(selection) = FuzzySelect::new()
         .items(&function_names)
         .max_length(15)
         .interact_opt()?
     {
+        let mut spinner = Spinner::new(spinners::Dots, "Generating...", spinoff::Color::Blue); 
         let f = &functions[selection];
 
         let (incomings, outgoings) = {
@@ -404,6 +411,7 @@ async fn main() -> anyhow::Result<()> {
                 cache.get(f).unwrap()
             }
         };
+        spinner.clear();
 
         for i in incomings
             .iter()
