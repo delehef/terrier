@@ -1,37 +1,28 @@
 use std::{
-    collections::{HashMap, HashSet},
-    io::stderr,
-    ops::ControlFlow,
-    path::Path,
-    process::Stdio,
+    collections::HashSet, io::stderr, path::Path, process::Stdio
 };
 
 use anyhow::{Context, ensure};
 use async_lsp::{
     LanguageServer,
-    concurrency::ConcurrencyLayer,
     lsp_types::{
-        CallHierarchyIncomingCall, CallHierarchyIncomingCallsParams, CallHierarchyItem,
-        CallHierarchyOutgoingCall, CallHierarchyOutgoingCallsParams, ClientCapabilities,
+        CallHierarchyIncomingCall, CallHierarchyItem,
+        CallHierarchyOutgoingCall, ClientCapabilities,
         InitializeParams, InitializedParams, NumberOrString, PartialResultParams,
-        ProgressParamsValue, SymbolInformation, SymbolKind, TraceValue, Url,
-        WindowClientCapabilities, WorkDoneProgress, WorkDoneProgressBegin, WorkDoneProgressEnd,
-        WorkDoneProgressParams, WorkDoneProgressReport, WorkspaceFolder, WorkspaceSymbolParams,
+        SymbolInformation, SymbolKind, TraceValue, Url,
+        WindowClientCapabilities, WorkDoneProgressParams, WorkspaceFolder, WorkspaceSymbolParams,
         WorkspaceSymbolResponse,
-        notification::{Progress, PublishDiagnostics, ShowMessage},
     },
-    panic::CatchUnwindLayer,
-    router::Router,
-    tracing::TracingLayer,
 };
 use clap::Parser;
-use colored::Colorize;
 use dialoguer::FuzzySelect;
 use fern::colors::{Color, ColoredLevelConfig};
+use indexing::{CallHierarchyCache, CallSite, Function, Stop};
 use log::{info, warn};
 use spinoff::{Spinner, spinners};
 use tabled::tables::IterTable;
-use tower::ServiceBuilder;
+
+mod indexing;
 
 #[derive(Parser)]
 #[command(version, about)]
@@ -49,144 +40,12 @@ struct Args {
     clutter: Vec<String>,
 }
 
-struct ClientState {
-    indexed_tx: Option<oneshot::Sender<()>>,
-}
-
-struct Stop;
-
-type CallHierarchyCache = HashMap<Function, (Vec<CallSite>, Vec<CallSite>)>;
-
-#[derive(PartialEq)]
-struct CallSite(CallHierarchyItem);
-impl CallSite {
-    fn pretty<P: AsRef<Path>>(&self, root: P) -> String {
-        let dets = if let Some(d) = self.0.detail.as_ref() {
-            match syn::parse_str::<syn::Signature>(d) {
-                Ok(sig) => {
-                    let outputs = match sig.output {
-                        syn::ReturnType::Default => String::new(),
-                        syn::ReturnType::Type(_, t) => format!("{t:?}"),
-                    };
-                    format!("{} -> {}", sig.ident, outputs)
-                }
-                Err(err) => format!("{d} -- {err:?}"),
-            }
-        } else {
-            "N/A".into()
-        };
-        let root = root.as_ref();
-        let relative_file = self
-            .0
-            .uri
-            .path()
-            .strip_prefix(root.as_os_str().to_str().unwrap())
-            .unwrap();
-        format!(
-            "{}:{} {}",
-            relative_file.bright_black(),
-            format!(
-                "({}, {})",
-                self.0.range.start.line, self.0.range.start.character,
-            )
-            .red(),
-            self.0.name.bold().bright_yellow()
-        )
-    }
-}
-impl std::hash::Hash for CallSite {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.0.uri.hash(state);
-        self.0.range.hash(state);
-    }
-}
-impl Eq for CallSite {}
-
-#[derive(Clone, PartialEq, Eq)]
-struct Function(SymbolInformation);
-impl Function {
-    fn pretty<P: AsRef<Path>>(&self, root: P) -> String {
-        let root = root.as_ref();
-        let relative_file = self
-            .0
-            .location
-            .uri
-            .path()
-            .strip_prefix(root.as_os_str().to_str().unwrap())
-            .unwrap();
-        format!(
-            "{}:{} {}{}",
-            relative_file.bright_black(),
-            self.0.location.range.start.line,
-            self.0
-                .container_name
-                .as_ref()
-                .map(|c| format!("{c}::"))
-                .unwrap_or_default()
-                .yellow(),
-            self.0.name.bold().bright_yellow()
-        )
-    }
-}
-impl std::hash::Hash for Function {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.0.location.uri.hash(state);
-        self.0.location.range.hash(state);
-    }
-}
-impl From<&Function> for CallHierarchyItem {
-    fn from(f: &Function) -> Self {
-        CallHierarchyItem {
-            name: f.0.name.clone(),
-            kind: f.0.kind.clone(),
-            tags: f.0.tags.clone(),
-            detail: None,
-            uri: f.0.location.uri.clone(),
-            range: f.0.location.range.clone(),
-            selection_range: f.0.location.range.clone(),
-            data: None,
-        }
-    }
-}
-impl From<&Function> for CallHierarchyIncomingCallsParams {
-    fn from(f: &Function) -> Self {
-        CallHierarchyIncomingCallsParams {
-            item: f.into(),
-            work_done_progress_params: WorkDoneProgressParams {
-                work_done_token: None,
-            },
-            partial_result_params: PartialResultParams {
-                partial_result_token: None,
-            },
-        }
-    }
-}
-impl From<&Function> for CallHierarchyOutgoingCallsParams {
-    fn from(f: &Function) -> Self {
-        CallHierarchyOutgoingCallsParams {
-            item: f.into(),
-            work_done_progress_params: WorkDoneProgressParams {
-                work_done_token: None,
-            },
-            partial_result_params: PartialResultParams {
-                partial_result_token: None,
-            },
-        }
-    }
-}
-
-const RA_INDEXING_TOKENS: &[&str] = &["rustAnalyzer/Indexing", "rustAnalyzer/cachePriming"];
-
-fn asdf() -> i32 {
-    4
-}
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
-    asdf();
     let mut cache: CallHierarchyCache = Default::default();
+    
     let colors = ColoredLevelConfig::new()
-        // use builder methods
         .info(Color::Green);
     fern::Dispatch::new()
         .format(move |out, message, record| {
@@ -204,51 +63,8 @@ async fn main() -> anyhow::Result<()> {
     let root = Path::new(&args.root).canonicalize()?;
     ensure!(root.is_dir(), "`{}` is not a directory", root.display());
 
-    let (indexed_tx, indexed_rx) = oneshot::channel();
 
-    let (mainloop, mut server) = async_lsp::MainLoop::new_client(|_server| {
-        let mut router = Router::new(ClientState {
-            indexed_tx: Some(indexed_tx),
-        });
-        router
-            .notification::<Progress>(|this, prog| {
-                let token = match &prog.token{
-                    NumberOrString::Number(x) => x.to_string(),
-                    NumberOrString::String(s) => s.strip_prefix("rustAnalyzer/").to_owned().unwrap_or_default().to_string(),
-                };
-
-                let ProgressParamsValue::WorkDone(ref progress) = prog.value;
-                    match progress {
-                        WorkDoneProgress::Begin(WorkDoneProgressBegin{title, message, percentage, ..})=> info!("[{}{}] {} {}", token, title, percentage.map(|x| format!(" {x}%")).unwrap_or_default(), message.as_ref().cloned().unwrap_or(String::new())),
-                        WorkDoneProgress::Report(WorkDoneProgressReport{message, percentage, ..}) => info!("[{}{}] {}", token, percentage.map(|x| format!(" {x}%")).unwrap_or_default(), message.as_ref().cloned().unwrap_or(String::new())),
-                        WorkDoneProgress::End(WorkDoneProgressEnd{message})=> info!("{} {}", token, message.as_ref().cloned().unwrap_or("done".to_owned()))
-                    }
-                if matches!(prog.token, NumberOrString::String(s) if RA_INDEXING_TOKENS.contains(&&*s))
-                    && matches!(
-                        prog.value,
-                        ProgressParamsValue::WorkDone(WorkDoneProgress::End(_))
-                    )
-                {
-                    // Sometimes rust-analyzer auto-index multiple times?
-                    if let Some(tx) = this.indexed_tx.take() {
-                        let _: Result<_, _> = tx.send(());
-                    }
-                }
-                ControlFlow::Continue(())
-            })
-            .notification::<PublishDiagnostics>(|_this, diag| { info!("DIAG {:?}", diag); ControlFlow::Continue(())})
-            .notification::<ShowMessage>(|_, params| {
-                info!("Message {:?}: {}", params.typ, params.message);
-                ControlFlow::Continue(())
-            })
-            .event(|_, _: Stop| ControlFlow::Break(Ok(())));
-
-        ServiceBuilder::new()
-            .layer(TracingLayer::default())
-            .layer(CatchUnwindLayer::default())
-            .layer(ConcurrencyLayer::default())
-            .service(router)
-    });
+    let ((mainloop, mut server), indexed_rx) = indexing::run_server();
 
     let child = async_process::Command::new(&args.ra_bin)
         .current_dir(&root)
@@ -397,7 +213,7 @@ async fn main() -> anyhow::Result<()> {
                         ..
                     } in xs.iter()
                     {
-                        if !args.clutter.contains(name) {
+                        if !args.clutter.contains(&name) {
                             incomings_set.insert(CallSite(ff.clone()));
                         }
                     }
@@ -415,7 +231,7 @@ async fn main() -> anyhow::Result<()> {
                         ..
                     } in xs.iter()
                     {
-                        if !args.clutter.contains(name) {
+                        if !args.clutter.contains(&name) {
                             outgoings_set.insert(CallSite(ff.clone()));
                         }
                     }
