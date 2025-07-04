@@ -1,5 +1,10 @@
 use std::{
-    collections::HashSet, default, fmt::Display, io::stderr, ops::ControlFlow, path::Path,
+    collections::{HashMap, HashSet},
+    default,
+    fmt::Display,
+    io::stderr,
+    ops::ControlFlow,
+    path::Path,
     process::Stdio,
 };
 
@@ -22,6 +27,8 @@ use async_lsp::{
     tracing::TracingLayer,
 };
 use clap::Parser;
+use colored::Colorize;
+use dialoguer::FuzzySelect;
 use fern::colors::{Color, ColoredLevelConfig};
 use log::{error, info, warn};
 use tower::ServiceBuilder;
@@ -47,6 +54,8 @@ struct ClientState {
 }
 
 struct Stop;
+
+type CallHierarchyCache = HashMap<Function, (Vec<CallSite>, Vec<CallSite>)>;
 
 #[derive(PartialEq)]
 struct CallSite(CallHierarchyItem);
@@ -75,7 +84,7 @@ impl CallSite {
             .unwrap();
         format!(
             "{relative_file}:{},{} {}",
-            self.0.range.start.line, self.0.range.start.character, self.0.name
+            self.0.range.start.line, self.0.range.start.character, self.0.name.bold().bright_white()
         )
     }
 }
@@ -87,7 +96,7 @@ impl std::hash::Hash for CallSite {
 }
 impl Eq for CallSite {}
 
-#[derive(PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 struct Function(SymbolInformation);
 impl Function {
     fn pretty<P: AsRef<Path>>(&self, root: P) -> String {
@@ -108,7 +117,7 @@ impl Function {
                 .as_ref()
                 .map(|c| format!("{c}::"))
                 .unwrap_or_default(),
-            self.0.name
+            self.0.name.bold().bright_white()
         )
     }
 }
@@ -168,6 +177,7 @@ fn asdf() -> i32 {
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
     asdf();
+    let mut cache: CallHierarchyCache = Default::default();
     let colors = ColoredLevelConfig::new()
         // use builder methods
         .info(Color::Green);
@@ -332,51 +342,77 @@ async fn main() -> anyhow::Result<()> {
         info!("None.");
     }
 
-    for (i, f) in functions.iter().enumerate() {
-        let mut incomings = HashSet::new();
-        let mut outgoings = HashSet::new();
+    let functions = functions.into_iter().collect::<Vec<_>>();
+    let function_names = functions
+        .iter()
+        .map(|f| f.pretty(&root))
+        .collect::<Vec<_>>();
 
-        if let Some(xs) = server
-            .incoming_calls(f.into())
-            .await
-            .context("failed to fetch incomings")?
-        {
-            for CallHierarchyIncomingCall {
-                from: ff @ CallHierarchyItem { name, .. },
-                ..
-            } in xs.iter()
-            {
-                if !args.clutter.contains(name) {
-                    incomings.insert(CallSite(ff.clone()));
+    while let Some(selection) = FuzzySelect::new()
+        .items(&function_names)
+        .max_length(15)
+        .interact_opt()?
+    {
+        let f = &functions[selection];
+
+        let (incomings, outgoings) = {
+            if let Some(callsites) = cache.get(f) {
+                callsites
+            } else {
+                let mut incomings = HashSet::new();
+                let mut outgoings = HashSet::new();
+
+                if let Some(xs) = server
+                    .incoming_calls(f.into())
+                    .await
+                    .context("failed to fetch incomings")?
+                {
+                    for CallHierarchyIncomingCall {
+                        from: ff @ CallHierarchyItem { name, .. },
+                        ..
+                    } in xs.iter()
+                    {
+                        if !args.clutter.contains(name) {
+                            incomings.insert(CallSite(ff.clone()));
+                        }
+                    }
                 }
-            }
-        }
 
-        if let Some(xs) = server
-            .outgoing_calls(f.into())
-            .await
-            .context("failed to fetch outgoings")?
-        {
-            for CallHierarchyOutgoingCall {
-                to: ff @ CallHierarchyItem { name, .. },
-                ..
-            } in xs.iter()
-            {
-                if !args.clutter.contains(name) {
-                    outgoings.insert(CallSite(ff.clone()));
+                if let Some(xs) = server
+                    .outgoing_calls(f.into())
+                    .await
+                    .context("failed to fetch outgoings")?
+                {
+                    for CallHierarchyOutgoingCall {
+                        to: ff @ CallHierarchyItem { name, .. },
+                        ..
+                    } in xs.iter()
+                    {
+                        if !args.clutter.contains(name) {
+                            outgoings.insert(CallSite(ff.clone()));
+                        }
+                    }
                 }
-            }
-        }
 
-        println!("\n\n{}", f.pretty(&root));
+                cache.insert(
+                    f.to_owned(),
+                    (
+                        incomings.into_iter().collect::<Vec<_>>(),
+                        outgoings.into_iter().collect::<Vec<_>>(),
+                    ),
+                );
+                cache.get(f).unwrap()
+            }
+        };
+
         for i in incomings
-            .into_iter()
+            .iter()
             .filter(|i| Path::new(i.0.uri.path()).starts_with(&root))
         {
             println!("    <-- {}", i.pretty(&root));
         }
         for o in outgoings
-            .into_iter()
+            .iter()
             .filter(|o| Path::new(o.0.uri.path()).starts_with(&root))
         {
             println!("    --> {}", o.pretty(&root));
