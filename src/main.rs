@@ -1,7 +1,5 @@
 use std::{
     collections::{HashMap, HashSet},
-    default,
-    fmt::Display,
     io::stderr,
     ops::ControlFlow,
     path::Path,
@@ -10,16 +8,16 @@ use std::{
 
 use anyhow::{Context, ensure};
 use async_lsp::{
-    Error, ErrorCode, LanguageServer,
+    LanguageServer,
     concurrency::ConcurrencyLayer,
     lsp_types::{
         CallHierarchyIncomingCall, CallHierarchyIncomingCallsParams, CallHierarchyItem,
         CallHierarchyOutgoingCall, CallHierarchyOutgoingCallsParams, ClientCapabilities,
-        DidOpenTextDocumentParams, InitializeParams, InitializedParams, NumberOrString,
-        PartialResultParams, ProgressParamsValue, SymbolInformation, SymbolKind, TextDocumentItem,
-        TraceValue, Url, WindowClientCapabilities, WorkDoneProgress, WorkDoneProgressBegin,
-        WorkDoneProgressEnd, WorkDoneProgressParams, WorkDoneProgressReport, WorkspaceFolder,
-        WorkspaceSymbolParams, WorkspaceSymbolResponse,
+        InitializeParams, InitializedParams, NumberOrString, PartialResultParams,
+        ProgressParamsValue, SymbolInformation, SymbolKind, TraceValue, Url,
+        WindowClientCapabilities, WorkDoneProgress, WorkDoneProgressBegin, WorkDoneProgressEnd,
+        WorkDoneProgressParams, WorkDoneProgressReport, WorkspaceFolder, WorkspaceSymbolParams,
+        WorkspaceSymbolResponse,
         notification::{Progress, PublishDiagnostics, ShowMessage},
     },
     panic::CatchUnwindLayer,
@@ -30,8 +28,8 @@ use clap::Parser;
 use colored::Colorize;
 use dialoguer::FuzzySelect;
 use fern::colors::{Color, ColoredLevelConfig};
-use log::{error, info, warn};
-use spinoff::{spinners, Spinner};
+use log::{info, warn};
+use spinoff::{Spinner, spinners};
 use tower::ServiceBuilder;
 
 #[derive(Parser)]
@@ -85,7 +83,9 @@ impl CallSite {
             .unwrap();
         format!(
             "{relative_file}:{},{} {}",
-            self.0.range.start.line, self.0.range.start.character, self.0.name.bold().bright_white()
+            self.0.range.start.line,
+            self.0.range.start.character,
+            self.0.name.bold().bright_white()
         )
     }
 }
@@ -301,8 +301,11 @@ async fn main() -> anyhow::Result<()> {
     indexed_rx.await.unwrap();
     warn!("Indexing done.");
 
-    let mut spinner = Spinner::new(spinners::Dots, "Indexing functions...", spinoff::Color::Blue); 
-
+    let mut spinner = Spinner::new(
+        spinners::Dots,
+        "Indexing functions...",
+        spinoff::Color::Blue,
+    );
 
     let mut functions = HashSet::new();
     warn!("Querying for symbols...");
@@ -346,43 +349,55 @@ async fn main() -> anyhow::Result<()> {
         info!("None.");
     }
 
-    let functions = functions.into_iter().collect::<Vec<_>>();
+    let mut functions = functions.into_iter().collect::<Vec<_>>();
+    info!("{} functions found", functions.len());
+    functions.sort_by(|f1, f2| {
+        f1.0.location.uri.cmp(&f2.0.location.uri).then(
+            f1.0.location
+                .range
+                .start
+                .line
+                .cmp(&f2.0.location.range.start.line),
+        )
+    });
     let function_names = functions
         .iter()
         .map(|f| f.pretty(&root))
         .collect::<Vec<_>>();
 
     spinner.stop_and_persist("", "Functions indexed");
-    
+
     while let Some(selection) = FuzzySelect::new()
         .items(&function_names)
         .max_length(15)
         .interact_opt()?
     {
-        let mut spinner = Spinner::new(spinners::Dots, "Generating...", spinoff::Color::Blue); 
+        let mut spinner = Spinner::new(spinners::Dots, "Generating...", spinoff::Color::Blue);
         let f = &functions[selection];
 
         let (incomings, outgoings) = {
             if let Some(callsites) = cache.get(f) {
                 callsites
             } else {
-                let mut incomings = HashSet::new();
-                let mut outgoings = HashSet::new();
+                let mut incomings = Vec::new();
+                let mut outgoings = Vec::new();
 
                 if let Some(xs) = server
                     .incoming_calls(f.into())
                     .await
                     .context("failed to fetch incomings")?
                 {
+                    let mut incomings_set = HashSet::new();
                     for CallHierarchyIncomingCall {
                         from: ff @ CallHierarchyItem { name, .. },
                         ..
                     } in xs.iter()
                     {
                         if !args.clutter.contains(name) {
-                            incomings.insert(CallSite(ff.clone()));
+                            incomings_set.insert(CallSite(ff.clone()));
                         }
                     }
+                    incomings.extend(incomings_set.into_iter());
                 }
 
                 if let Some(xs) = server
@@ -390,24 +405,31 @@ async fn main() -> anyhow::Result<()> {
                     .await
                     .context("failed to fetch outgoings")?
                 {
+                    let mut outgoings_set = HashSet::new();
                     for CallHierarchyOutgoingCall {
                         to: ff @ CallHierarchyItem { name, .. },
                         ..
                     } in xs.iter()
                     {
                         if !args.clutter.contains(name) {
-                            outgoings.insert(CallSite(ff.clone()));
+                            outgoings_set.insert(CallSite(ff.clone()));
                         }
                     }
+                    outgoings.extend(outgoings_set.into_iter());
                 }
 
-                cache.insert(
-                    f.to_owned(),
-                    (
-                        incomings.into_iter().collect::<Vec<_>>(),
-                        outgoings.into_iter().collect::<Vec<_>>(),
-                    ),
-                );
+                incomings.sort_by(|f1, f2| {
+                    f1.0.uri
+                        .cmp(&f2.0.uri)
+                        .then(f1.0.range.start.line.cmp(&f2.0.range.start.line))
+                });
+                outgoings.sort_by(|f1, f2| {
+                    f1.0.uri
+                        .cmp(&f2.0.uri)
+                        .then(f1.0.range.start.line.cmp(&f2.0.range.start.line))
+                });
+
+                cache.insert(f.to_owned(), (incomings, outgoings));
                 cache.get(f).unwrap()
             }
         };
