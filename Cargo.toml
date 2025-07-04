@@ -17,5 +17,6 @@ regex-lite = "0.1.6"
 serde_json = "1.0.140"
 spinoff = "0.8.0"
 syn = { version = "2.0.104", features = ["parsing", "full", "extra-traits"] }
+tabled = { version = "0.20.0", default-features = false, features = ["ansi"] }
 tokio = {version = "1.46.0", features = ["io-std", "io-util", "macros", "process", "rt", "time"]}
 tower = "0.5.2"

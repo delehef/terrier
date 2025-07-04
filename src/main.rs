@@ -30,6 +30,7 @@ use dialoguer::FuzzySelect;
 use fern::colors::{Color, ColoredLevelConfig};
 use log::{info, warn};
 use spinoff::{Spinner, spinners};
+use tabled::tables::IterTable;
 use tower::ServiceBuilder;
 
 #[derive(Parser)]
@@ -82,10 +83,14 @@ impl CallSite {
             .strip_prefix(root.as_os_str().to_str().unwrap())
             .unwrap();
         format!(
-            "{relative_file}:{},{} {}",
-            self.0.range.start.line,
-            self.0.range.start.character,
-            self.0.name.bold().bright_white()
+            "{}:{} {}",
+            relative_file.bright_black(),
+            format!(
+                "({}, {})",
+                self.0.range.start.line, self.0.range.start.character,
+            )
+            .red(),
+            self.0.name.bold().bright_yellow()
         )
     }
 }
@@ -111,14 +116,15 @@ impl Function {
             .unwrap();
         format!(
             "{}:{} {}{}",
-            relative_file,
+            relative_file.bright_black(),
             self.0.location.range.start.line,
             self.0
                 .container_name
                 .as_ref()
                 .map(|c| format!("{c}::"))
-                .unwrap_or_default(),
-            self.0.name.bold().bright_white()
+                .unwrap_or_default()
+                .yellow(),
+            self.0.name.bold().bright_yellow()
         )
     }
 }
@@ -211,14 +217,12 @@ async fn main() -> anyhow::Result<()> {
                     NumberOrString::String(s) => s.strip_prefix("rustAnalyzer/").to_owned().unwrap_or_default().to_string(),
                 };
 
-                if let ProgressParamsValue::WorkDone(ref progress) = prog.value {
+                let ProgressParamsValue::WorkDone(ref progress) = prog.value;
                     match progress {
                         WorkDoneProgress::Begin(WorkDoneProgressBegin{title, message, percentage, ..})=> info!("[{}{}] {} {}", token, title, percentage.map(|x| format!(" {x}%")).unwrap_or_default(), message.as_ref().cloned().unwrap_or(String::new())),
                         WorkDoneProgress::Report(WorkDoneProgressReport{message, percentage, ..}) => info!("[{}{}] {}", token, percentage.map(|x| format!(" {x}%")).unwrap_or_default(), message.as_ref().cloned().unwrap_or(String::new())),
                         WorkDoneProgress::End(WorkDoneProgressEnd{message})=> info!("{} {}", token, message.as_ref().cloned().unwrap_or("done".to_owned()))
                     }
-                } else {
-                }
                 if matches!(prog.token, NumberOrString::String(s) if RA_INDEXING_TOKENS.contains(&&*s))
                     && matches!(
                         prog.value,
@@ -435,18 +439,48 @@ async fn main() -> anyhow::Result<()> {
         };
         spinner.clear();
 
-        for i in incomings
-            .iter()
-            .filter(|i| Path::new(i.0.uri.path()).starts_with(&root))
-        {
-            println!("    <-- {}", i.pretty(&root));
-        }
-        for o in outgoings
-            .iter()
-            .filter(|o| Path::new(o.0.uri.path()).starts_with(&root))
-        {
-            println!("    --> {}", o.pretty(&root));
-        }
+        let header = [
+            "".to_string(),
+            "".to_string(),
+            f.pretty(&root),
+            "".to_string(),
+            "".to_string(),
+        ];
+        let content = std::iter::once(header)
+            .chain(
+                incomings
+                    .iter()
+                    .filter(|i| Path::new(i.0.uri.path()).starts_with(&root))
+                    .map(|i| {
+                        [
+                            i.pretty(&root),
+                            "--->".to_string(),
+                            "".into(),
+                            "".into(),
+                            "".into(),
+                        ]
+                    }),
+            )
+            .chain(
+                outgoings
+                    .iter()
+                    .filter(|o| Path::new(o.0.uri.path()).starts_with(&root))
+                    .map(|o| {
+                        [
+                            "".into(),
+                            "".into(),
+                            "".into(),
+                            "--->".to_string(),
+                            o.pretty(&root),
+                        ]
+                    }),
+            );
+
+
+        let table = IterTable::new(content);
+        let o = table.to_string();
+
+        println!("{o}");
     }
 
     // Shutdown.
