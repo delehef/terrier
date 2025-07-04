@@ -1,5 +1,6 @@
 use std::{
-    collections::HashSet, default, io::stderr, ops::ControlFlow, path::Path, process::Stdio,
+    collections::HashSet, default, fmt::Display, io::stderr, ops::ControlFlow, path::Path,
+    process::Stdio,
 };
 
 use anyhow::{Context, ensure};
@@ -49,6 +50,35 @@ struct Stop;
 
 #[derive(PartialEq)]
 struct CallSite(CallHierarchyItem);
+impl CallSite {
+    fn pretty<P: AsRef<Path>>(&self, root: P) -> String {
+        let dets = if let Some(d) = self.0.detail.as_ref() {
+            match syn::parse_str::<syn::Signature>(d) {
+                Ok(sig) => {
+                    let outputs = match sig.output {
+                        syn::ReturnType::Default => String::new(),
+                        syn::ReturnType::Type(_, t) => format!("{t:?}"),
+                    };
+                    format!("{} -> {}", sig.ident, outputs)
+                }
+                Err(err) => format!("{d} -- {err:?}"),
+            }
+        } else {
+            "N/A".into()
+        };
+        let root = root.as_ref();
+        let relative_file = self
+            .0
+            .uri
+            .path()
+            .strip_prefix(root.as_os_str().to_str().unwrap())
+            .unwrap();
+        format!(
+            "{relative_file}:{},{} {}",
+            self.0.range.start.line, self.0.range.start.character, self.0.name
+        )
+    }
+}
 impl std::hash::Hash for CallSite {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.0.uri.hash(state);
@@ -59,6 +89,29 @@ impl Eq for CallSite {}
 
 #[derive(PartialEq, Eq)]
 struct Function(SymbolInformation);
+impl Function {
+    fn pretty<P: AsRef<Path>>(&self, root: P) -> String {
+        let root = root.as_ref();
+        let relative_file = self
+            .0
+            .location
+            .uri
+            .path()
+            .strip_prefix(root.as_os_str().to_str().unwrap())
+            .unwrap();
+        format!(
+            "{}:{} {}{}",
+            relative_file,
+            self.0.location.range.start.line,
+            self.0
+                .container_name
+                .as_ref()
+                .map(|c| format!("{c}::"))
+                .unwrap_or_default(),
+            self.0.name
+        )
+    }
+}
 impl std::hash::Hash for Function {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.0.location.uri.hash(state);
@@ -280,7 +333,6 @@ async fn main() -> anyhow::Result<()> {
     }
 
     for (i, f) in functions.iter().enumerate() {
-        println!("{i} {}", f.0.name);
         let mut incomings = HashSet::new();
         let mut outgoings = HashSet::new();
 
@@ -316,14 +368,18 @@ async fn main() -> anyhow::Result<()> {
             }
         }
 
-        println!("{}", f.0.name);
-        println!("  CALLED BY");
-        for i in incomings.into_iter() {
-            println!("    <-- {}", i.0.name);
+        println!("\n\n{}", f.pretty(&root));
+        for i in incomings
+            .into_iter()
+            .filter(|i| Path::new(i.0.uri.path()).starts_with(&root))
+        {
+            println!("    <-- {}", i.pretty(&root));
         }
-        println!("  CALLING");
-        for i in outgoings.into_iter() {
-            println!("    --> {}", i.0.name);
+        for o in outgoings
+            .into_iter()
+            .filter(|o| Path::new(o.0.uri.path()).starts_with(&root))
+        {
+            println!("    --> {}", o.pretty(&root));
         }
     }
 
