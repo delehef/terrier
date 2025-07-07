@@ -230,8 +230,16 @@ impl Ui {
             match menu(&mut self.tty, "Goto...", &choices) {
                 i @ ('0'..'9') => {
                     let i = i.to_digit(10).unwrap() as usize;
-                    let f_id = i_to_fn_id[i];
-                    explore_stack.push(f_id);
+                    let new_f_id = i_to_fn_id[i];
+
+                    // Only push the new frame if we are not already in it
+                    if explore_stack
+                        .last()
+                        .map(|top| *top != new_f_id)
+                        .unwrap_or(true)
+                    {
+                        explore_stack.push(new_f_id);
+                    }
                 }
                 'b' => {
                     if explore_stack.is_empty() {
@@ -241,12 +249,19 @@ impl Ui {
                     }
                 }
                 'j' => {
-                    explore_stack.push(
-                        FuzzySelect::new()
-                            .items(&self.function_names)
-                            .max_length(15)
-                            .interact()?,
-                    );
+                    let new_f_id = FuzzySelect::new()
+                        .items(&self.function_names)
+                        .max_length(15)
+                        .interact()?;
+
+                    // Only push the new frame if we are not already in it
+                    if explore_stack
+                        .last()
+                        .map(|top| *top != new_f_id)
+                        .unwrap_or(true)
+                    {
+                        explore_stack.push(new_f_id);
+                    }
                 }
                 _ => unreachable!(),
             }
