@@ -13,10 +13,9 @@ use async_lsp::{
         CallHierarchyIncomingCall, CallHierarchyIncomingCallsParams, CallHierarchyItem,
         CallHierarchyOutgoingCall, CallHierarchyOutgoingCallsParams, ClientCapabilities,
         InitializeParams, InitializedParams, NumberOrString, PartialResultParams,
-        ProgressParamsValue, SymbolInformation, SymbolKind, TraceValue, Url,
-        WindowClientCapabilities, WorkDoneProgress, WorkDoneProgressBegin, WorkDoneProgressEnd,
-        WorkDoneProgressParams, WorkDoneProgressReport, WorkspaceFolder, WorkspaceSymbolParams,
-        WorkspaceSymbolResponse,
+        ProgressParamsValue, SymbolInformation, SymbolKind, Url, WindowClientCapabilities,
+        WorkDoneProgress, WorkDoneProgressBegin, WorkDoneProgressEnd, WorkDoneProgressParams,
+        WorkDoneProgressReport, WorkspaceFolder, WorkspaceSymbolParams, WorkspaceSymbolResponse,
         notification::{Progress, PublishDiagnostics, ShowMessage},
     },
     panic::CatchUnwindLayer,
@@ -25,7 +24,7 @@ use async_lsp::{
 };
 use async_process::Child;
 use colored::Colorize;
-use log::{error, info};
+use log::info;
 use tokio::{task::JoinHandle, time::sleep};
 use tower::ServiceBuilder;
 
@@ -399,12 +398,6 @@ impl Index {
         self.server.emit(Stop).unwrap();
         self.mainloop_fut.await?;
         Ok(())
-    }
-
-    pub fn fn_from_callsite(&self, c: &CallSite) -> Option<&Function> {
-        self.functions
-            .iter()
-            .find(|f| f.0.location.uri == c.0.uri && f.0.location.range == c.0.selection_range)
     }
 
     pub fn fn_id_from_callsite(&self, c: &CallSite) -> Option<usize> {

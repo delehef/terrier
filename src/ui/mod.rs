@@ -135,7 +135,11 @@ impl Ui {
                 .enumerate()
                 .map(|(i, f)| (i.to_string().chars().next().unwrap(), f))
                 .take(10)
-                .chain(vec![('b', "ack".into()), ('j', "ump".into())])
+                .chain(vec![
+                    ('b', "ack".into()),
+                    ('j', "ump".into()),
+                    ('o', "pen...".into()),
+                ])
                 .collect::<Vec<_>>();
 
             let i_to_fn_id = incomings
@@ -270,6 +274,13 @@ impl Ui {
                     {
                         explore_stack.push(new_f_id);
                     }
+                }
+                'o' => {
+                    let _ = std::process::Command::new("emacsclient")
+                        // LSP lines start at 1
+                        .arg(format!("+{}", f.0.location.range.start.line + 1))
+                        .arg(format!("{}", f.0.location.uri.path()))
+                        .spawn();
                 }
                 _ => unreachable!(),
             }
