@@ -89,6 +89,7 @@ impl Ui {
                     .max_length(15)
                     .interact_opt()?
                 {
+                    explore_stack.push(i);
                     i
                 } else {
                     return Ok(());
@@ -103,7 +104,7 @@ impl Ui {
             if start.elapsed().as_secs() > 10 {
                 Notification::new()
                     .summary("Function ready")
-                    .body(&format!("{} has been successfully racked", f.0.name))
+                    .body(&format!("{} has been successfully tracked", f.0.name))
                     .appname("Terrier")
                     .show()?;
             }
