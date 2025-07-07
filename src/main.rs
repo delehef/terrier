@@ -1,21 +1,19 @@
-use std::path::Path;
+use std::path::PathBuf;
 
-use anyhow::{Context, ensure};
+use anyhow::ensure;
 use clap::Parser;
-use dialoguer::FuzzySelect;
 use fern::colors::{Color, ColoredLevelConfig};
 use indexing::Index;
-use spinoff::{Spinner, spinners};
-use tabled::tables::IterTable;
 
 mod indexing;
+mod ui;
 
 #[derive(Parser)]
 #[command(version, about)]
 struct Args {
     /// Root of the project to analyze.
     #[arg(short = 'R', long, default_value = ".")]
-    root: String,
+    root: PathBuf,
 
     /// The rust-analyzer binary to use
     #[arg(short, long, default_value = "rust-analyzer")]
@@ -42,77 +40,9 @@ async fn main() -> anyhow::Result<()> {
         .apply()?;
 
     let args = Args::parse();
-    let root = Path::new(&args.root).canonicalize()?;
+    let root = args.root.canonicalize()?;
     ensure!(root.is_dir(), "`{}` is not a directory", root.display());
 
-    let mut indexer = Index::new(&root, args.clutter.into_iter().collect(), &args.ra_bin).await?;
-
-    // Find all functions in project
-    let mut spinner = Spinner::new(
-        spinners::Dots,
-        "Indexing functions...",
-        spinoff::Color::Blue,
-    );
-
-    let function_names = indexer
-        .functions
-        .iter()
-        .map(|f| f.pretty(&root))
-        .collect::<Vec<_>>();
-    spinner.stop_and_persist("", "Functions indexed");
-
-    while let Some(f_id) = FuzzySelect::new()
-        .items(&function_names)
-        .max_length(15)
-        .interact_opt()?
-    {
-        let mut spinner = Spinner::new(spinners::Dots, "Generating...", spinoff::Color::Blue);
-        let (incomings, outgoings) = indexer.context(f_id).await?;
-        spinner.clear();
-
-        let header = [
-            "".to_string(),
-            "".to_string(),
-            indexer.functions[f_id].pretty(&root),
-            "".to_string(),
-            "".to_string(),
-        ];
-
-        let content = std::iter::once(header)
-            .chain(
-                incomings
-                    .iter()
-                    .filter(|i| Path::new(i.0.uri.path()).starts_with(&root))
-                    .map(|i| {
-                        [
-                            i.pretty(&root),
-                            "--->".to_string(),
-                            "".into(),
-                            "".into(),
-                            "".into(),
-                        ]
-                    }),
-            )
-            .chain(
-                outgoings
-                    .iter()
-                    .filter(|o| Path::new(o.0.uri.path()).starts_with(&root))
-                    .map(|o| {
-                        [
-                            "".into(),
-                            "".into(),
-                            "".into(),
-                            "--->".to_string(),
-                            o.pretty(&root),
-                        ]
-                    }),
-            );
-
-        let table = IterTable::new(content);
-        let o = table.to_string();
-
-        println!("{o}");
-    }
-
-    indexer.shutdown().await.context("shutting down indexer")
+    let indexer = Index::new(&root, args.clutter.into_iter().collect(), &args.ra_bin).await?;
+    ui::Ui::new(indexer)?.run().await
 }

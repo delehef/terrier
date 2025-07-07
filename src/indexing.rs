@@ -1,7 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     ops::ControlFlow,
-    path::Path,
+    path::{Path, PathBuf},
     process::Stdio,
 };
 
@@ -165,6 +165,7 @@ pub struct Index {
     /// A handle to the LS process.
     _child: Child,
 
+    pub root: PathBuf,
     clutter: HashSet<String>,
     pub functions: Vec<Function>,
     cache: CallHierarchyCache,
@@ -331,6 +332,7 @@ impl Index {
         });
 
         Ok(Self {
+            root: root.as_ref().to_path_buf(),
             // Keep a handle to the LS process so that it does not die
             _child,
             clutter,
