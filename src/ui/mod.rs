@@ -1,6 +1,7 @@
 use anyhow::Context;
 use colored::Colorize;
 use dialoguer::FuzzySelect;
+use notify_rust::Notification;
 use spinoff::{Spinner, spinners};
 use std::{
     io::Write,
@@ -93,9 +94,19 @@ impl Ui {
                     return Ok(());
                 }
             };
+
+            let start = std::time::Instant::now();
             let mut spinner = Spinner::new(spinners::Dots, "Generating...", spinoff::Color::Blue);
             let (incomings, outgoings) = self.indexer.context(f_id).await?;
             spinner.clear();
+            let f = &self.indexer.functions[f_id];
+            if start.elapsed().as_secs() > 10 {
+                Notification::new()
+                    .summary("Function ready")
+                    .body(&format!("{} has been successfully racked", f.0.name))
+                    .appname("Terrier")
+                    .show()?;
+            }
 
             let choices = incomings
                 .iter()
@@ -162,11 +173,8 @@ impl Ui {
                 });
 
             let (center_column, center_pad) = (
-                vec![
-                    "CURRENT".white(),
-                    self.indexer.functions[f_id].0.name.bright_white(),
-                ],
-                self.indexer.functions[f_id].0.name.len() + 3,
+                vec!["CURRENT".white(), f.0.name.bright_white()],
+                f.0.name.len() + 3,
             );
 
             let (right_column, right_pad) = std::iter::once("CALLEES".purple())
