@@ -79,7 +79,7 @@ impl Function {
             .uri
             .path()
             .strip_prefix(root.as_os_str().to_str().unwrap())
-            .unwrap();
+            .unwrap_or(self.0.location.uri.path());
         format!(
             "{}:{} {}{}",
             relative_file.bright_black(),
