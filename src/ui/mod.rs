@@ -8,15 +8,23 @@ use std::{
 };
 use tabled::tables::IterTable;
 
-use crate::indexing::Index;
+use crate::indexing::{CallSite, Index};
 
-fn menu(tty: &mut console::Term, title: &str, choices: &[(char, &str)]) -> Option<char> {
+fn menu<S: AsRef<str>>(
+    tty: &mut console::Term,
+    title: &str,
+    choices: &[(char, S)],
+) -> Option<char> {
     let prompt = format!(
         "{}: {} - {}uit",
         title.white().bold(),
         choices
             .iter()
-            .map(|(trigger, rest)| format!("{}{rest}", format!("[{trigger}]").yellow().bold()))
+            .map(|(trigger, rest)| format!(
+                "{}{}",
+                format!("[{trigger}]").yellow().bold(),
+                rest.as_ref()
+            ),)
             .collect::<Vec<_>>()
             .join(" - "),
         "[q]".red().bold(),
@@ -59,7 +67,7 @@ impl Ui {
 
         while let Some(choice) = menu(&mut self.tty, "", &[('f', "unction")]) {
             match choice {
-                'f' => self.function().await?,
+                'f' => self.jump_to_function().await?,
                 'q' => break,
                 _ => unreachable!(),
             }
@@ -73,65 +81,108 @@ impl Ui {
         Ok(())
     }
 
-    pub async fn function(&mut self) -> anyhow::Result<()> {
+    pub async fn jump_to_function(&mut self) -> anyhow::Result<()> {
         if let Some(f_id) = FuzzySelect::new()
             .items(&self.function_names)
             .max_length(15)
             .interact_opt()?
         {
-            let mut spinner = Spinner::new(spinners::Dots, "Generating...", spinoff::Color::Blue);
-            let (incomings, outgoings) = self.indexer.context(f_id).await?;
-            spinner.clear();
+            self.show_function(f_id, Vec::new()).await
+        } else {
+            Ok(())
+        }
+    }
 
-            let header = [
-                "".to_string(),
-                "".to_string(),
-                self.indexer.functions[f_id].pretty(&self.root),
-                "".to_string(),
-                "".to_string(),
-            ];
+    pub async fn show_function(
+        &mut self,
+        f_id: usize,
+        mut explore_stack: Vec<usize>,
+    ) -> anyhow::Result<()> {
+        let mut spinner = Spinner::new(spinners::Dots, "Generating...", spinoff::Color::Blue);
+        let (incomings, outgoings) = self.indexer.context(f_id).await?;
+        spinner.clear();
 
-            let content = std::iter::once(header)
-                .chain(
-                    incomings
-                        .iter()
-                        .filter(|i| Path::new(i.0.uri.path()).starts_with(&self.root))
-                        .map(|i| {
-                            [
-                                i.pretty(&self.root),
-                                "--->".to_string(),
-                                "".into(),
-                                "".into(),
-                                "".into(),
-                            ]
-                        }),
-                )
-                .chain(
-                    outgoings
-                        .iter()
-                        .filter(|o| Path::new(o.0.uri.path()).starts_with(&self.root))
-                        .map(|o| {
-                            [
-                                "".into(),
-                                "".into(),
-                                "".into(),
-                                "--->".to_string(),
-                                o.pretty(&self.root),
-                            ]
-                        }),
-                );
+        let choices = incomings
+            .iter()
+            .chain(outgoings.iter())
+            .filter(|f| self.indexer.fn_id_from_callsite(f).is_some())
+            .map(|f| f.0.name.bright_purple().bold().to_string())
+            .enumerate()
+            .map(|(i, f)| (i.to_string().chars().next().unwrap(), f))
+            .take(10)
+            .collect::<Vec<_>>();
 
-            let table = IterTable::new(content);
-            let o = table.to_string();
+        let i_to_fn_id = incomings
+            .iter()
+            .chain(outgoings.iter())
+            .filter_map(|f| self.indexer.fn_id_from_callsite(f))
+            .take(10)
+            .collect::<Vec<_>>();
 
-            println!("{o}");
+        let header = [
+            "".to_string(),
+            "".to_string(),
+            self.indexer.functions[f_id].pretty(&self.root),
+            "".to_string(),
+            "".to_string(),
+        ];
 
-            let choices = incomings
+        let content = std::iter::once(header)
+            .chain(
+                incomings
+                    .iter()
+                    .filter(|i| Path::new(i.0.uri.path()).starts_with(&self.root))
+                    .map(|i| {
+                        [
+                            i.pretty(&self.root),
+                            "--->".to_string(),
+                            "".into(),
+                            "".into(),
+                            "".into(),
+                        ]
+                    }),
+            )
+            .chain(
+                outgoings
+                    .iter()
+                    .filter(|o| Path::new(o.0.uri.path()).starts_with(&self.root))
+                    .map(|o| {
+                        [
+                            "".into(),
+                            "".into(),
+                            "".into(),
+                            "--->".to_string(),
+                            o.pretty(&self.root),
+                        ]
+                    }),
+            );
+
+        let table = IterTable::new(content);
+        let o = table.to_string();
+
+        println!("{o}");
+
+        while let Some(choice) = menu(
+            &mut self.tty,
+            explore_stack
                 .iter()
-                .chain(outgoings.iter())
-                .map(|f| todo!())
-                .collect::<Vec<_>>();
-            while let Some(choice) = menu(&mut self.tty, "", &choices) {}
+                .map(|f_id| self.indexer.functions[*f_id].pretty(&self.root))
+                .collect::<Vec<_>>()
+                .join("\n")
+                .as_str(),
+            &choices,
+        ) {
+            match choice {
+                i @ ('0'..'9') => {
+                    let i = i.to_digit(10).unwrap() as usize;
+                    let f_id = i_to_fn_id[i];
+                    let mut explore_stack = explore_stack.clone();
+                    explore_stack.push(f_id);
+                    Box::pin(self.show_function(f_id, explore_stack)).await?
+                }
+                'q' => return Ok(()),
+                _ => unreachable!(),
+            }
         }
 
         Ok(())

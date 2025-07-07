@@ -25,8 +25,8 @@ use async_lsp::{
 };
 use async_process::Child;
 use colored::Colorize;
-use log::info;
-use tokio::task::JoinHandle;
+use log::{error, info};
+use tokio::{task::JoinHandle, time::sleep};
 use tower::ServiceBuilder;
 
 pub struct ClientState {
@@ -37,31 +37,17 @@ pub struct Stop;
 
 pub type CallHierarchyCache = HashMap<Function, (Vec<CallSite>, Vec<CallSite>)>;
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct CallSite(pub CallHierarchyItem);
 impl CallSite {
     pub fn pretty<P: AsRef<Path>>(&self, root: P) -> String {
-        let _dets = if let Some(d) = self.0.detail.as_ref() {
-            match syn::parse_str::<syn::Signature>(d) {
-                Ok(sig) => {
-                    let outputs = match sig.output {
-                        syn::ReturnType::Default => String::new(),
-                        syn::ReturnType::Type(_, t) => format!("{t:?}"),
-                    };
-                    format!("{} -> {}", sig.ident, outputs)
-                }
-                Err(err) => format!("{d} -- {err:?}"),
-            }
-        } else {
-            "N/A".into()
-        };
         let root = root.as_ref();
         let relative_file = self
             .0
             .uri
             .path()
             .strip_prefix(root.as_os_str().to_str().unwrap())
-            .unwrap();
+            .unwrap_or(self.0.uri.path());
         format!(
             "{}:{} {}",
             relative_file.bright_black(),
@@ -82,7 +68,7 @@ impl std::hash::Hash for CallSite {
 }
 impl Eq for CallSite {}
 
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Function(pub SymbolInformation);
 impl Function {
     pub fn pretty<P: AsRef<Path>>(&self, root: P) -> String {
@@ -155,7 +141,7 @@ impl From<&Function> for CallHierarchyOutgoingCallsParams {
     }
 }
 
-const RA_INDEXING_TOKENS: &[&str] = &["rustAnalyzer/Indexing", "rustAnalyzer/cachePriming"];
+const RA_INDEXING_TOKENS: &[&str] = &["rustAnalyzer/cachePriming"];
 
 pub struct Index {
     /// A handle to the LS interaction loop
@@ -194,7 +180,7 @@ impl Index {
                     match progress {
                         WorkDoneProgress::Begin(WorkDoneProgressBegin{title, message, percentage, ..})=> info!("[{}{}] {} {}", token, title, percentage.map(|x| format!(" {x}%")).unwrap_or_default(), message.as_ref().cloned().unwrap_or(String::new())),
                         WorkDoneProgress::Report(WorkDoneProgressReport{message, percentage, ..}) => info!("[{}{}] {}", token, percentage.map(|x| format!(" {x}%")).unwrap_or_default(), message.as_ref().cloned().unwrap_or(String::new())),
-                        WorkDoneProgress::End(WorkDoneProgressEnd{message})=> info!("{} {}", token, message.as_ref().cloned().unwrap_or("done".to_owned()))
+                        WorkDoneProgress::End(WorkDoneProgressEnd{message})=> info!("{:?} {}", prog.token, message.as_ref().cloned().unwrap_or("done".to_owned()))
                     }
                 if matches!(prog.token, NumberOrString::String(s) if RA_INDEXING_TOKENS.contains(&&*s))
                     && matches!(
@@ -254,15 +240,11 @@ impl Index {
                     }),
                     ..ClientCapabilities::default()
                 },
-                trace: Some(TraceValue::Verbose),
-                work_done_progress_params: WorkDoneProgressParams {
-                    work_done_token: Some(NumberOrString::String("GGGGG".into())),
-                },
                 initialization_options: Some(
                     serde_json::from_str(
                         r#"{
 "files": {"excludeDirs": [".direnv", ".devenv"]},
-"workspace": {"symbol": {"search": {"limit": 10000, "kind": "all_symbols", "scope": "workspace"}}},
+"workspace": {"symbol": {"search": {"limit": 100000, "kind": "all_symbols", "scope": "workspace"}}},
 "cargo": {"targetDir": "target/terrier"}
 }"#,
                     )
@@ -276,6 +258,7 @@ impl Index {
         server.initialized(InitializedParams {}).unwrap();
 
         indexed_rx.await.unwrap();
+        sleep(std::time::Duration::from_secs(1)).await;
         info!("Project indexed.");
 
         let mut functions = HashSet::new();
@@ -416,5 +399,19 @@ impl Index {
         self.server.emit(Stop).unwrap();
         self.mainloop_fut.await?;
         Ok(())
+    }
+
+    pub fn fn_from_callsite(&self, c: &CallSite) -> Option<&Function> {
+        self.functions
+            .iter()
+            .find(|f| f.0.location.uri == c.0.uri && f.0.location.range == c.0.selection_range)
+    }
+
+    pub fn fn_id_from_callsite(&self, c: &CallSite) -> Option<usize> {
+        self.functions
+            .iter()
+            .enumerate()
+            .find(|(_, f)| f.0.location.uri == c.0.uri && f.0.location.range == c.0.selection_range)
+            .map(|(i, _)| i)
     }
 }
