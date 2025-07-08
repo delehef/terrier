@@ -27,6 +27,7 @@ use colored::Colorize;
 use log::info;
 use tokio::{task::JoinHandle, time::sleep};
 use tower::ServiceBuilder;
+use typed_id::TypedId;
 
 pub struct ClientState {
     indexed_tx: Option<oneshot::Sender<()>>,
@@ -142,6 +143,8 @@ impl From<&Function> for CallHierarchyOutgoingCallsParams {
 
 const RA_INDEXING_TOKENS: &[&str] = &["rustAnalyzer/cachePriming"];
 
+pub type FunctionId = TypedId<usize, Function>;
+
 pub struct Index {
     /// A handle to the LS interaction loop
     mainloop_fut: JoinHandle<()>,
@@ -154,6 +157,7 @@ pub struct Index {
     clutter: HashSet<String>,
     pub functions: Vec<Function>,
     cache: CallHierarchyCache,
+    uri_map: HashMap<Url, Vec<FunctionId>>,
 }
 impl Index {
     pub async fn new<P: AsRef<Path>>(
@@ -313,6 +317,13 @@ impl Index {
             )
         });
 
+        let mut uri_map = HashMap::<Url, Vec<FunctionId>>::new();
+        for (i, f) in functions.iter().enumerate() {
+            uri_map
+                .entry(f.0.location.uri.clone())
+                .or_default()
+                .push(i.into());
+        }
         Ok(Self {
             root: root.as_ref().to_path_buf(),
             // Keep a handle to the LS process so that it does not die
@@ -320,14 +331,19 @@ impl Index {
             clutter,
             functions,
             cache: Default::default(),
+
             mainloop_fut,
             server,
+            uri_map,
         })
     }
 
-    pub async fn context(&mut self, f_id: usize) -> anyhow::Result<(Vec<CallSite>, Vec<CallSite>)> {
+    pub async fn context(
+        &mut self,
+        f_id: FunctionId,
+    ) -> anyhow::Result<(Vec<CallSite>, Vec<CallSite>)> {
         let (incomings, outgoings) = {
-            if let Some(callsites) = self.cache.get(&self.functions[f_id]) {
+            if let Some(callsites) = self.cache.get(&self.functions[*f_id]) {
                 callsites
             } else {
                 let mut incomings = Vec::new();
@@ -335,7 +351,7 @@ impl Index {
 
                 if let Some(xs) = self
                     .server
-                    .incoming_calls((&self.functions[f_id]).into())
+                    .incoming_calls((&self.functions[*f_id]).into())
                     .await
                     .context("failed to fetch incomings")?
                 {
@@ -354,7 +370,7 @@ impl Index {
 
                 if let Some(xs) = self
                     .server
-                    .outgoing_calls((&self.functions[f_id]).into())
+                    .outgoing_calls((&self.functions[*f_id]).into())
                     .await
                     .context("failed to fetch outgoings")?
                 {
@@ -382,7 +398,7 @@ impl Index {
                         .then(f1.0.range.start.line.cmp(&f2.0.range.start.line))
                 });
 
-                let f = self.functions[f_id].clone();
+                let f = self.functions[*f_id].clone();
                 self.cache.insert(f.clone(), (incomings, outgoings));
                 self.cache.get(&f).unwrap()
             }
@@ -400,11 +416,14 @@ impl Index {
         Ok(())
     }
 
-    pub fn fn_id_from_callsite(&self, c: &CallSite) -> Option<usize> {
-        self.functions
-            .iter()
-            .enumerate()
-            .find(|(_, f)| f.0.location.uri == c.0.uri && f.0.location.range == c.0.selection_range)
-            .map(|(i, _)| i)
+    pub fn fn_id_from_callsite(&self, c: &CallSite) -> Option<FunctionId> {
+        self.uri_map
+            .get(&c.0.uri)
+            .and_then(|f_ids| {
+                f_ids
+                    .iter()
+                    .find(|&f_id| self.functions[**f_id].0.location.range == c.0.selection_range)
+            })
+            .copied()
     }
 }

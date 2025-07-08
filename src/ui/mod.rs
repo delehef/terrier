@@ -8,7 +8,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crate::indexing::Index;
+use crate::indexing::{FunctionId, Index};
 
 fn menu(tty: &mut console::Term, title: &str, choices: &[(char, impl AsRef<str>)]) -> char {
     let prompt = format!(
@@ -80,27 +80,26 @@ impl Ui {
     pub async fn function_loop(&mut self, explore_stack: Vec<usize>) -> anyhow::Result<()> {
         let mut explore_stack = explore_stack.clone();
         loop {
-            let f_id = if let Some(i) = explore_stack.last() {
+            let f_id: FunctionId = if let Some(i) = explore_stack.last() {
                 *i
+            } else if let Some(i) = FuzzySelect::new()
+                .with_prompt("Select a function - <ESC> quit")
+                .items(&self.function_names)
+                .max_length(15)
+                .interact_opt()?
+            {
+                explore_stack.push(i);
+                i
             } else {
-                if let Some(i) = FuzzySelect::new()
-                    .with_prompt("Select a function - <ESC> quit")
-                    .items(&self.function_names)
-                    .max_length(15)
-                    .interact_opt()?
-                {
-                    explore_stack.push(i);
-                    i
-                } else {
-                    return Ok(());
-                }
-            };
+                return Ok(());
+            }
+            .into();
 
             let start = std::time::Instant::now();
             let mut spinner = Spinner::new(spinners::Dots, "Generating...", spinoff::Color::Blue);
             let (incomings, outgoings) = self.indexer.context(f_id).await?;
             spinner.clear();
-            let f = &self.indexer.functions[f_id];
+            let f = &self.indexer.functions[*f_id];
             if start.elapsed().as_secs() > 10 {
                 Notification::new()
                     .summary("Function ready")
@@ -156,7 +155,7 @@ impl Ui {
                 })
                 .filter_map(|f| self.indexer.fn_id_from_callsite(f))
                 .take(10)
-                .collect::<Vec<_>>();
+                .collect::<Vec<FunctionId>>();
 
             let (left_column, left_pad) = std::iter::once("CALLERS".blue())
                 .chain(
@@ -241,17 +240,17 @@ impl Ui {
             }
 
             match menu(&mut self.tty, "Goto...", &choices) {
-                i @ ('0'..'9') => {
+                i @ ('0'..='9') => {
                     let i = i.to_digit(10).unwrap() as usize;
                     let new_f_id = i_to_fn_id[i];
 
                     // Only push the new frame if we are not already in it
                     if explore_stack
                         .last()
-                        .map(|top| *top != new_f_id)
+                        .map(|top| *top != *new_f_id)
                         .unwrap_or(true)
                     {
-                        explore_stack.push(new_f_id);
+                        explore_stack.push(*new_f_id);
                     }
                 }
                 'b' => {
