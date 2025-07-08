@@ -1,6 +1,7 @@
 use anyhow::Context;
 use colored::Colorize;
 use dialoguer::FuzzySelect;
+#[cfg(target_os = "linux")]
 use notify_rust::Notification;
 use spinoff::{Spinner, spinners};
 use std::{
@@ -95,16 +96,20 @@ impl Ui {
             }
             .into();
 
+            #[cfg(target_os = "linux")]
             let start = std::time::Instant::now();
+
             let mut spinner = Spinner::new(spinners::Dots, "Generating...", spinoff::Color::Blue);
             let (incomings, outgoings) = self.indexer.context(f_id).await?;
             spinner.clear();
             let f = &self.indexer.functions[*f_id];
+
+            #[cfg(target_os = "linux")]
             if start.elapsed().as_secs() > 10 {
                 Notification::new()
                     .summary("Function ready")
                     .body(&format!("{} has been successfully tracked", f.0.name))
-                    .appname("Terrier")
+                    .finalize()
                     .show()?;
             }
 
