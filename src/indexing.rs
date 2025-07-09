@@ -221,7 +221,7 @@ impl Index {
             .stderr(std::io::stderr())
             .kill_on_drop(true)
             .spawn()
-            .expect("Failed run rust-analyzer");
+            .context("Failed to run rust-analyzer")?;
         let stdout = _child.stdout.take().unwrap();
         let stdin = _child.stdin.take().unwrap();
 
@@ -341,6 +341,7 @@ impl Index {
     pub async fn context(
         &mut self,
         f_id: FunctionId,
+        only_in_project: bool,
     ) -> anyhow::Result<(Vec<CallSite>, Vec<CallSite>)> {
         let (incomings, outgoings) = {
             if let Some(callsites) = self.cache.get(&self.functions[*f_id]) {
@@ -404,7 +405,30 @@ impl Index {
             }
         };
 
-        Ok((incomings.to_vec(), outgoings.to_vec()))
+        Ok((
+            incomings
+                .iter()
+                .filter(|f| {
+                    if only_in_project {
+                        Path::new(f.0.uri.path()).starts_with(&self.root)
+                    } else {
+                        true
+                    }
+                })
+                .cloned()
+                .collect(),
+            outgoings
+                .iter()
+                .filter(|f| {
+                    if only_in_project {
+                        Path::new(f.0.uri.path()).starts_with(&self.root)
+                    } else {
+                        true
+                    }
+                })
+                .cloned()
+                .collect(),
+        ))
     }
 
     pub async fn shutdown(mut self) -> anyhow::Result<()> {

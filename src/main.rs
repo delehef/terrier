@@ -16,7 +16,7 @@ struct Args {
     root: PathBuf,
 
     /// The rust-analyzer binary to use
-    #[arg(short, long, default_value = "rust-analyzer")]
+    #[arg(long, default_value = "rust-analyzer")]
     ra_bin: String,
 
     /// A list of function names to ignore

@@ -1,45 +1,27 @@
 use anyhow::Context;
 use colored::Colorize;
+use compact_str::CompactString;
+use debruijn::DeBruijner;
 use dialoguer::FuzzySelect;
 #[cfg(target_os = "linux")]
 use notify_rust::Notification;
+use prompt::{Entry, menu};
 use spinoff::{Spinner, spinners};
-use std::{
-    io::Write,
-    path::{Path, PathBuf},
-};
+use std::path::PathBuf;
 
 use crate::indexing::{FunctionId, Index};
 
-fn menu(tty: &mut console::Term, title: &str, choices: &[(char, impl AsRef<str>)]) -> char {
-    let prompt = format!(
-        "{} {}",
-        title.white().bold(),
-        choices
-            .iter()
-            .map(|(trigger, rest)| format!(
-                "{}{}",
-                format!("[{trigger}]").yellow().bold(),
-                rest.as_ref()
-            ),)
-            .collect::<Vec<_>>()
-            .join(" - "),
-    );
-    writeln!(tty, "{prompt}").unwrap();
-    loop {
-        match tty.read_char().unwrap() {
-            x if choices.iter().any(|(trigger, _)| *trigger == x) => return x,
-            _ => {}
-        }
-    }
-}
+mod debruijn;
+mod prompt;
 
 pub struct Settings {
-    only_own: bool,
+    only_in_project: bool,
 }
 impl Default for Settings {
     fn default() -> Self {
-        Self { only_own: true }
+        Self {
+            only_in_project: true,
+        }
     }
 }
 
@@ -79,6 +61,14 @@ impl Ui {
     }
 
     pub async fn function_loop(&mut self, explore_stack: Vec<usize>) -> anyhow::Result<()> {
+        #[derive(Clone)]
+        enum FnAction {
+            GoTo(FunctionId),
+            Jump,
+            Back,
+            Quit,
+            OpenIn,
+        }
         let mut explore_stack = explore_stack.clone();
         loop {
             let f_id: FunctionId = if let Some(i) = explore_stack.last() {
@@ -100,7 +90,10 @@ impl Ui {
             let start = std::time::Instant::now();
 
             let mut spinner = Spinner::new(spinners::Dots, "Generating...", spinoff::Color::Blue);
-            let (incomings, outgoings) = self.indexer.context(f_id).await?;
+            let (incomings, outgoings) = self
+                .indexer
+                .context(f_id, self.settings.only_in_project)
+                .await?;
             spinner.clear();
             let f = &self.indexer.functions[*f_id];
 
@@ -113,111 +106,83 @@ impl Ui {
                     .show()?;
             }
 
+            let chords = DeBruijner::default().generate_n(incomings.len() + outgoings.len());
+
             let choices = incomings
                 .iter()
-                .filter(|f| {
-                    self.indexer.fn_id_from_callsite(f).is_some()
-                        && if self.settings.only_own {
-                            Path::new(f.0.uri.path()).starts_with(&self.root)
-                        } else {
-                            true
-                        }
-                })
-                .map(|f| f.0.name.bright_blue().bold().to_string())
-                .chain(
-                    outgoings
-                        .iter()
-                        .filter(|f| {
-                            self.indexer.fn_id_from_callsite(f).is_some()
-                                && if self.settings.only_own {
-                                    Path::new(f.0.uri.path()).starts_with(&self.root)
-                                } else {
-                                    true
-                                }
-                        })
-                        .map(|f| f.0.name.bright_purple().bold().to_string()),
-                )
+                .chain(outgoings.iter())
+                .filter_map(|f| self.indexer.fn_id_from_callsite(f).map(|id| (f, id)))
                 .enumerate()
-                .map(|(i, f)| (i.to_string().chars().next().unwrap(), f))
-                .take(10)
+                .map(|(i, (f, f_id))| Entry {
+                    chord: chords[i].clone(),
+                    label: CompactString::from(&f.0.name),
+                    payload: FnAction::GoTo(f_id),
+                    show: false,
+                })
                 .chain(vec![
-                    ('b', "ack".into()),
-                    ('j', "ump".into()),
-                    ('o', "pen...".into()),
+                    Entry {
+                        chord: "o".into(),
+                        label: "open...".into(),
+                        payload: FnAction::OpenIn,
+                        show: true,
+                    },
+                    Entry {
+                        chord: "b".into(),
+                        label: "back".into(),
+                        payload: FnAction::Back,
+                        show: true,
+                    },
+                    Entry {
+                        chord: "j".into(),
+                        label: "jump".into(),
+                        payload: FnAction::Jump,
+                        show: true,
+                    },
+                    Entry {
+                        chord: "q".into(),
+                        label: "quit".into(),
+                        payload: FnAction::Quit,
+                        show: true,
+                    },
                 ])
                 .collect::<Vec<_>>();
 
-            let i_to_fn_id = incomings
-                .iter()
-                .chain(outgoings.iter())
-                .filter(|f| {
-                    self.indexer.fn_id_from_callsite(f).is_some()
-                        && if self.settings.only_own {
-                            Path::new(f.0.uri.path()).starts_with(&self.root)
-                        } else {
-                            true
-                        }
-                })
-                .filter_map(|f| self.indexer.fn_id_from_callsite(f))
-                .take(10)
-                .collect::<Vec<FunctionId>>();
+            let left_column = std::iter::once("CALLERS".blue().to_string())
+                .chain(incomings.iter().enumerate().map(|(i, f)| {
+                    format!(
+                        "[{}] {}",
+                        chords[i].yellow().bold(),
+                        f.0.name.bright_blue().bold()
+                    )
+                }))
+                .collect::<Vec<_>>();
 
-            let (left_column, left_pad) = std::iter::once("CALLERS".blue())
-                .chain(
-                    incomings
-                        .iter()
-                        .filter(|i| {
-                            if self.settings.only_own {
-                                Path::new(i.0.uri.path()).starts_with(&self.root)
-                            } else {
-                                true
-                            }
-                        })
-                        .map(|f| f.0.name.bright_blue().bold()),
-                )
-                .fold((Vec::new(), 10), |(mut cells, pad), f| {
-                    let pad = pad.max(f.len() + 3);
-                    cells.push(f);
-                    (cells, pad)
-                });
+            let center_column = vec![
+                "CURRENT".white().to_string(),
+                f.0.name.bright_white().to_string(),
+            ];
 
-            let (center_column, center_pad) = (
-                vec!["CURRENT".white(), f.0.name.bright_white()],
-                f.0.name.len() + 3,
+            let right_column = std::iter::once("CALLEES".purple().to_string())
+                .chain(outgoings.iter().enumerate().map(|(i, f)| {
+                    format!(
+                        "[{}] {}",
+                        chords[i + incomings.len()].yellow().bold(),
+                        f.0.name.bright_purple().bold()
+                    )
+                }))
+                .collect::<Vec<_>>();
+
+            let mut tabled = tabled::builder::Builder::new();
+            tabled.push_column(left_column);
+            tabled.push_column(center_column);
+            tabled.push_column(right_column);
+            let mut table = tabled.build();
+            table.with(
+                tabled::settings::Style::sharp()
+                    .remove_verticals()
+                    .remove_frame(),
             );
-
-            let (right_column, right_pad) = std::iter::once("CALLEES".purple())
-                .chain(
-                    outgoings
-                        .iter()
-                        .filter(|i| {
-                            if self.settings.only_own {
-                                Path::new(i.0.uri.path()).starts_with(&self.root)
-                            } else {
-                                true
-                            }
-                        })
-                        .map(|f| f.0.name.bright_purple().bold()),
-                )
-                .fold((Vec::new(), 10), |(mut cells, pad), f| {
-                    let pad = pad.max(f.len() + 3);
-                    cells.push(f);
-                    (cells, pad)
-                });
-
-            println!("\n\n");
-            for i in 0..left_column
-                .len()
-                .max(center_column.len())
-                .max(right_column.len())
-            {
-                println!(
-                    "{:left_pad$} {:center_pad$} {:right_pad$}",
-                    left_column.get(i).unwrap_or(&"".white()),
-                    center_column.get(i).unwrap_or(&"".white()),
-                    right_column.get(i).unwrap_or(&"".white())
-                );
-            }
+            println!("{table}");
 
             if !explore_stack.is_empty() {
                 println!(
@@ -244,28 +209,26 @@ impl Ui {
                 );
             }
 
-            match menu(&mut self.tty, "Goto...", &choices) {
-                i @ ('0'..='9') => {
-                    let i = i.to_digit(10).unwrap() as usize;
-                    let new_f_id = i_to_fn_id[i];
-
+            match menu(&mut self.tty, "", choices)? {
+                FnAction::GoTo(new_fn_id) => {
                     // Only push the new frame if we are not already in it
                     if explore_stack
                         .last()
-                        .map(|top| *top != *new_f_id)
+                        .map(|top| *top != *new_fn_id)
                         .unwrap_or(true)
                     {
-                        explore_stack.push(*new_f_id);
+                        explore_stack.push(*new_fn_id);
                     }
                 }
-                'b' => {
+                FnAction::Quit => return Ok(()),
+                FnAction::Back => {
                     if explore_stack.is_empty() {
                         return Ok(());
                     } else {
                         explore_stack.pop();
                     }
                 }
-                'j' => {
+                FnAction::Jump => {
                     let new_f_id = FuzzySelect::new()
                         .items(&self.function_names)
                         .max_length(15)
@@ -280,14 +243,13 @@ impl Ui {
                         explore_stack.push(new_f_id);
                     }
                 }
-                'o' => {
+                FnAction::OpenIn => {
                     let _ = std::process::Command::new("emacsclient")
                         // LSP lines start at 1
                         .arg(format!("+{}", f.0.location.range.start.line + 1))
                         .arg(format!("{}", f.0.location.uri.path()))
                         .spawn();
                 }
-                _ => unreachable!(),
             }
         }
     }
