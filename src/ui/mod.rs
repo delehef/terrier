@@ -7,7 +7,10 @@ use dialoguer::FuzzySelect;
 use notify_rust::Notification;
 use prompt::{Entry, menu};
 use spinoff::{Spinner, spinners};
-use std::path::{Path, PathBuf};
+use std::{
+    collections::VecDeque,
+    path::{Path, PathBuf},
+};
 use tabled::Table;
 
 use crate::indexing::{Function, FunctionId, Index};
@@ -61,6 +64,53 @@ impl Ui {
         Ok(())
     }
 
+    async fn rec_context(
+        &mut self,
+        f_id: FunctionId,
+        forward: usize,
+        backward: usize,
+        cg: &mut CallGraph,
+    ) -> anyhow::Result<()> {
+        let mut todos = VecDeque::new();
+        todos.push_back((f_id, forward, 0));
+        todos.push_back((f_id, 0, backward));
+
+        while let Some((f_id, forward, backward)) = todos.pop_front() {
+            assert!(!(forward > 0 && backward > 0));
+
+            let (incomings, outgoings) = self
+                .indexer
+                .context(f_id, self.settings.only_in_project)
+                .await?;
+            let incomings = incomings
+                .into_iter()
+                .filter_map(|i| self.indexer.fn_id_from_callsite(&i))
+                .collect::<Vec<_>>();
+            let outgoings = outgoings
+                .into_iter()
+                .filter_map(|o| self.indexer.fn_id_from_callsite(&o))
+                .collect::<Vec<_>>();
+
+            if forward > 0 {
+                cg.add_outgoings(f_id, &outgoings);
+                todos.extend(
+                    outgoings
+                        .iter()
+                        .map(|new_f_id| (new_f_id.clone(), forward - 1, backward)),
+                );
+            } else if backward > 0 {
+                cg.add_incomings(f_id, &incomings);
+                todos.extend(
+                    incomings
+                        .iter()
+                        .map(|new_f_id| (new_f_id.clone(), forward, backward - 1)),
+                );
+            }
+        }
+
+        Ok(())
+    }
+
     pub async fn function_loop(
         &mut self,
         mut navigation_stack: NavigationStack,
@@ -94,12 +144,20 @@ impl Ui {
             let start = std::time::Instant::now();
 
             let mut spinner = Spinner::new(spinners::Dots, "Generating...", spinoff::Color::Blue);
+            let mut cg = CallGraph {
+                elts: vec![CallNode::new(f_id)],
+            };
+            self.rec_context(f_id, 20, 20, &mut cg).await?;
+            spinner.clear();
+            cg.print(&|f| {
+                let i: usize = (**f).into();
+                format!("{}", self.indexer.functions[i].0.name)
+            });
+
             let (incomings, outgoings) = self
                 .indexer
                 .context(f_id, self.settings.only_in_project)
                 .await?;
-            spinner.clear();
-            let f = &self.indexer.functions[*f_id];
 
             #[cfg(target_os = "linux")]
             if start.elapsed().as_secs() > 10 {
@@ -167,6 +225,7 @@ impl Ui {
                 )
                 .collect::<Vec<_>>();
 
+            let f = &self.indexer.functions[*f_id];
             let center_column = vec![
                 "CURRENT".white().to_string(),
                 f.0.name.bright_white().to_string(),
@@ -300,5 +359,82 @@ impl NavigationStack {
         ));
 
         Some(table)
+    }
+}
+
+#[derive(Debug)]
+struct CallNode {
+    f: FunctionId,
+    incomings: Vec<usize>,
+    outgoings: Vec<usize>,
+}
+impl CallNode {
+    fn new(f: FunctionId) -> Self {
+        Self {
+            f,
+            incomings: Default::default(),
+            outgoings: Default::default(),
+        }
+    }
+}
+
+#[derive(Default, Debug)]
+struct CallGraph {
+    elts: Vec<CallNode>,
+}
+impl CallGraph {
+    fn add_outgoings(&mut self, parent: FunctionId, outgoings: &Vec<FunctionId>) {
+        let parent_id = self.elts.iter().position(|e| e.f == parent).unwrap();
+        for o in outgoings.iter() {
+            let child_id = if let Some(existing) = self.elts.iter().position(|e| e.f == *o) {
+                existing
+            } else {
+                let new_id = self.elts.len();
+                self.elts.push(CallNode::new(*o));
+                new_id
+            };
+            if parent_id != child_id && !self.elts[parent_id].outgoings.contains(&child_id) {
+                self.elts[parent_id].outgoings.push(child_id);
+            }
+        }
+    }
+
+    fn add_incomings(&mut self, parent: FunctionId, incomings: &Vec<FunctionId>) {
+        let parent_id = self.elts.iter().position(|e| e.f == parent).unwrap();
+        for o in incomings.iter() {
+            let child_id = if let Some(existing) = self.elts.iter().position(|e| e.f == *o) {
+                existing
+            } else {
+                let new_id = self.elts.len();
+                self.elts.push(CallNode::new(*o));
+                new_id
+            };
+            if parent_id != child_id && !self.elts[parent_id].incomings.contains(&child_id) {
+                self.elts[parent_id].incomings.push(child_id);
+            }
+        }
+    }
+
+    fn rec_print_forward(&self, f: &impl Fn(&FunctionId) -> String, i: usize, depth: usize) {
+        let indent = "    ".repeat(depth);
+        println!("{}{} - {}", indent, f(&self.elts[i].f), self.elts[i].f);
+        for o in self.elts[i].outgoings.iter() {
+            self.rec_print_forward(f, *o, depth + 1);
+        }
+    }
+
+    fn rec_print_backward(&self, f: &impl Fn(&FunctionId) -> String, i: usize, depth: usize) {
+        let indent = "    ".repeat(depth);
+        println!("{}{} - {}", indent, f(&self.elts[i].f), self.elts[i].f);
+        for c in self.elts[i].incomings.iter() {
+            self.rec_print_backward(f, *c, depth + 1);
+        }
+    }
+
+    fn print(&self, f: &impl Fn(&FunctionId) -> String) {
+        println!("FORWARD");
+        self.rec_print_forward(f, 0, 0);
+        println!("\n\nBACKWARD");
+        self.rec_print_backward(f, 0, 0);
     }
 }

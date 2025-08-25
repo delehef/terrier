@@ -43,6 +43,6 @@ async fn main() -> anyhow::Result<()> {
     let root = args.root.canonicalize()?;
     ensure!(root.is_dir(), "`{}` is not a directory", root.display());
 
-    let indexer = Index::new(&root, args.clutter.into_iter().collect(), &args.ra_bin).await?;
+    let mut indexer = Index::new(&root, args.clutter.into_iter().collect(), &args.ra_bin).await?;
     ui::Ui::new(indexer)?.run().await
 }

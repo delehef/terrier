@@ -25,7 +25,10 @@ use async_lsp::{
 use async_process::Child;
 use colored::Colorize;
 use log::info;
-use tokio::{task::JoinHandle, time::sleep};
+use tokio::{
+    task::{JoinHandle, JoinSet},
+    time::sleep,
+};
 use tower::ServiceBuilder;
 use typed_id::TypedId;
 
