@@ -64,6 +64,8 @@ impl Ui {
         Ok(())
     }
 
+    /// Build a partial callgraph exploring up to `backward` callers and
+    /// `forward` callees, with `f_id` as the center.
     async fn rec_context(
         &mut self,
         f_id: FunctionId,
@@ -163,7 +165,10 @@ impl Ui {
             if start.elapsed().as_secs() > 10 {
                 Notification::new()
                     .summary("Function ready")
-                    .body(&format!("{} has been successfully tracked", f.0.name))
+                    .body(&format!(
+                        "{} has been successfully tracked",
+                        self.indexer.functions[*f_id].0.name
+                    ))
                     .finalize()
                     .show()?;
             }
